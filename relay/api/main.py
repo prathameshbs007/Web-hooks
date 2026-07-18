@@ -1,9 +1,14 @@
 from contextlib import asynccontextmanager
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from relay.api.errors import ApiError
+from relay.api.routes import endpoints, events, tenants
 from relay.config import get_settings
 from relay.db.engine import get_engine
 from relay.observability import get_logger, setup_logging
@@ -40,8 +45,32 @@ async def lifespan(app: FastAPI):
     await get_engine().dispose()
 
 
+def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code, content={"error": {"code": code, "message": message}}
+    )
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Relay", lifespan=lifespan)
+
+    app.include_router(tenants.router)
+    app.include_router(endpoints.router)
+    app.include_router(events.router)
+
+    @app.exception_handler(ApiError)
+    async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
+        return _error_response(exc.status_code, exc.code, exc.message)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        return _error_response(422, "validation_error", str(exc.errors()[:3]))
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(
+        request: Request, exc: StarletteHTTPException
+    ) -> JSONResponse:
+        return _error_response(exc.status_code, "http_error", str(exc.detail))
 
     @app.get("/healthz")
     async def healthz(response: Response) -> dict:
