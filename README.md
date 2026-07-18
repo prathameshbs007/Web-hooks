@@ -21,6 +21,43 @@ ruff check .
 pytest
 ```
 
+## Verifying signatures (receiver side)
+
+Every delivery carries these headers:
+
+```
+Relay-Id: <delivery_id>
+Relay-Event-Id: <event_id>
+Relay-Timestamp: <unix_seconds>
+Relay-Signature: v1=<hex hmac_sha256(secret, "{timestamp}.{raw_body}")>
+```
+
+Verify against the **raw request body** — parsing and re-encoding the JSON will
+change the bytes and break the signature:
+
+```python
+import hashlib, hmac, time
+
+def verify(secret: str, raw_body: bytes, timestamp: str, signature: str) -> bool:
+    # Reject stale timestamps so a captured request can't be replayed later.
+    if abs(int(time.time()) - int(timestamp)) > 300:
+        return False
+    expected = hmac.new(
+        secret.encode(), f"{timestamp}.".encode() + raw_body, hashlib.sha256
+    ).hexdigest()
+    # Constant-time compare: never leak how much of the digest matched.
+    return hmac.compare_digest(f"v1={expected}", signature)
+```
+
+A working implementation lives in [flaky_endpoint/main.py](flaky_endpoint/main.py),
+which verifies every request it receives.
+
+## Delivery semantics
+
+At-least-once. Workers ACK a stream entry only after the attempt row is
+committed, so a crash mid-delivery replays the entry rather than losing it —
+receivers should deduplicate on `Relay-Event-Id`.
+
 Full specification and build phases: [CLAUDE.md](CLAUDE.md).
 This README grows with each phase (architecture, signing verification, ordering
 tradeoffs, load numbers, agent design).

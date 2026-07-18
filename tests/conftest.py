@@ -27,8 +27,15 @@ def _reachable(host: str, port: int) -> bool:
         return False
 
 
+FLAKY_URL = "http://localhost:9000"
+
+
 def infra_available() -> bool:
-    return _reachable("localhost", 5433) and _reachable("localhost", 6379)
+    return (
+        _reachable("localhost", 5433)
+        and _reachable("localhost", 6379)
+        and _reachable("localhost", 9000)
+    )
 
 
 requires_infra = pytest.mark.skipif(

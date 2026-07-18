@@ -2,9 +2,11 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     Text,
@@ -105,3 +107,27 @@ class Delivery(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class DeliveryAttempt(Base):
+    """Immutable record of one HTTP attempt. Never updated, only inserted."""
+
+    __tablename__ = "delivery_attempts"
+    __table_args__ = (
+        Index("ix_delivery_attempts_delivery_number", "delivery_id", "attempt_number"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    delivery_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("deliveries.id", ondelete="CASCADE")
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    latency_ms: Mapped[int] = mapped_column(Integer)
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_class: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Truncated to 1 KB: enough to diagnose, bounded so a chatty receiver
+    # can't bloat the table.
+    response_snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
