@@ -10,7 +10,9 @@ from relay.api.errors import ApiError
 from relay.api.schemas import DeliveryOut, ReplayRequest, ReplayResult
 from relay.db.engine import get_session
 from relay.db.models import Delivery, Endpoint, Tenant
+from relay.delivery.circuit_breaker import reset as reset_breaker
 from relay.delivery.enqueue import enqueue_delivery
+from relay.delivery.ordering import enqueue_ordered
 from relay.delivery.retry_queue import remove_from_retry_queue
 from relay.observability import get_logger
 
@@ -64,6 +66,12 @@ async def replay(body: ReplayRequest, session: SessionDep, tenant: TenantDep) ->
     if body.delivery_ids:
         query = query.where(Delivery.id.in_(body.delivery_ids))
 
+    endpoint_ordering = (
+        await session.execute(
+            select(Endpoint.ordering).where(Endpoint.id == body.endpoint_id)
+        )
+    ).scalar_one()
+
     deliveries = list((await session.execute(query)).scalars())
     for delivery in deliveries:
         delivery.status = "pending"
@@ -71,11 +79,18 @@ async def replay(body: ReplayRequest, session: SessionDep, tenant: TenantDep) ->
         delivery.next_attempt_at = None
     await session.commit()
 
+    if deliveries:
+        # Replaying is an explicit human signal that the endpoint should be
+        # retried now; leaving the breaker open would just re-gate everything.
+        await reset_breaker(body.endpoint_id)
+
     replayed = []
     for delivery in deliveries:
         # A dead delivery shouldn't have a scheduled retry, but drop any stale
         # ZSET member so the replay can't be shadowed by an old entry.
         await remove_from_retry_queue(delivery.id, delivery.event_id, delivery.endpoint_id)
+        if endpoint_ordering == "ordered":
+            await enqueue_ordered(delivery.endpoint_id, delivery.id)
         await enqueue_delivery(delivery.id, delivery.event_id, delivery.endpoint_id)
         replayed.append(delivery.id)
 

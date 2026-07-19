@@ -7,9 +7,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from relay.api.auth import generate_signing_secret, require_tenant
 from relay.api.errors import not_found
-from relay.api.schemas import EndpointCreate, EndpointCreated, EndpointOut, EndpointPatch
+from relay.api.schemas import (
+    BreakerState,
+    EndpointCreate,
+    EndpointCreated,
+    EndpointOut,
+    EndpointPatch,
+)
 from relay.db.engine import get_session
 from relay.db.models import Endpoint, Tenant
+from relay.delivery.circuit_breaker import get_state as get_breaker_state
+from relay.delivery.circuit_breaker import reset as reset_breaker
 
 router = APIRouter(prefix="/v1/endpoints", tags=["endpoints"])
 
@@ -71,6 +79,24 @@ async def patch_endpoint(
             setattr(endpoint, field, value)
     await session.commit()
     return endpoint
+
+
+@router.get("/{endpoint_id}/breaker", response_model=BreakerState)
+async def get_breaker(
+    endpoint_id: uuid.UUID, session: SessionDep, tenant: TenantDep
+) -> BreakerState:
+    """Current circuit-breaker state — the operator's view of endpoint health."""
+    await _get_owned(session, tenant, endpoint_id)
+    return BreakerState(**await get_breaker_state(endpoint_id))
+
+
+@router.post("/{endpoint_id}/breaker/reset", status_code=204)
+async def reset_breaker_endpoint(
+    endpoint_id: uuid.UUID, session: SessionDep, tenant: TenantDep
+) -> None:
+    """Force the breaker closed after fixing the receiver."""
+    await _get_owned(session, tenant, endpoint_id)
+    await reset_breaker(endpoint_id)
 
 
 @router.delete("/{endpoint_id}", status_code=204)

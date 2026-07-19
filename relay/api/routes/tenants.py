@@ -17,7 +17,12 @@ async def create_tenant(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> TenantCreated:
     api_key = generate_api_key()
-    tenant = Tenant(name=body.name, api_key_hash=hash_api_key(api_key))
+    tenant = Tenant(
+        name=body.name,
+        api_key_hash=hash_api_key(api_key),
+        rate_per_sec=body.rate_per_sec,
+        max_inflight=body.max_inflight,
+    )
     session.add(tenant)
     await session.commit()
     return TenantCreated(

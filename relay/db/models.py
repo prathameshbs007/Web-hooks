@@ -29,6 +29,9 @@ class Tenant(Base):
     name: Mapped[str] = mapped_column(Text)
     # Only a SHA-256 hash of the API key is stored; the plaintext key is shown once.
     api_key_hash: Mapped[str] = mapped_column(Text, unique=True)
+    # NULL = fall back to DEFAULT_TENANT_* settings.
+    rate_per_sec: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_inflight: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

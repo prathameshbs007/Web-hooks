@@ -1,9 +1,18 @@
-"""The retry ZSET and its atomic Lua move. Requires Redis on localhost."""
+"""The retry ZSET and its atomic Lua move. Requires Redis on localhost.
+
+These run against a dedicated Redis database: the live retry-scheduler
+container polls the real `relay:retries` continuously, so sharing a keyspace
+with it makes any assertion about queue depth a race.
+"""
 
 import time
 import uuid
 
-from relay.delivery.enqueue import get_redis, shard_for, stream_key
+import pytest
+import redis.asyncio as aioredis
+
+from relay.delivery import retry_queue as retry_queue_mod
+from relay.delivery.enqueue import shard_for, stream_key
 from relay.delivery.retry_queue import (
     RETRY_ZSET,
     encode_member,
@@ -15,6 +24,23 @@ from relay.delivery.retry_queue import (
 from tests.conftest import requires_infra
 
 pytestmark = requires_infra
+
+# db 15: isolated from the running stack (which uses db 0).
+TEST_REDIS_URL = "redis://localhost:6379/15"
+
+
+@pytest.fixture(autouse=True)
+async def isolated_redis(monkeypatch):
+    client = aioredis.from_url(TEST_REDIS_URL, decode_responses=True)
+    await client.flushdb()
+    monkeypatch.setattr(retry_queue_mod, "get_redis", lambda: client)
+    yield client
+    await client.flushdb()
+    await client.aclose()
+
+
+def get_redis():
+    return retry_queue_mod.get_redis()
 
 
 def _ids():

@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field
 
 class TenantCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
+    # Omit to use DEFAULT_TENANT_RATE_PER_SEC / DEFAULT_TENANT_MAX_INFLIGHT.
+    rate_per_sec: int | None = Field(default=None, ge=1, le=10_000)
+    max_inflight: int | None = Field(default=None, ge=1, le=1_000)
 
 
 class TenantCreated(BaseModel):
@@ -25,6 +28,13 @@ class EndpointCreate(BaseModel):
     url: str = Field(pattern=r"^https?://", max_length=2000)
     ordering: Literal["ordered", "unordered"] = "unordered"
     event_types: list[str] = []
+
+
+class BreakerState(BaseModel):
+    state: str
+    consecutive: int
+    opened_at: float | None = None
+    last_probe_at: float | None = None
 
 
 class EndpointOut(BaseModel):

@@ -155,13 +155,19 @@ async def test_duplicate_stream_entry_does_not_resend(api_client):
 
     event_id, delivery_id, endpoint_id = await _ingest(api_client, auth)
     await _wait_for_status(delivery_id, {"delivered"})
-    sent_first = len(await _flaky_items())
+
+    def _mine(items):
+        # Count only this delivery: other tests share the receiver.
+        return [i for i in items if i["delivery_id"] == str(delivery_id)]
+
+    sent_first = len(_mine(await _flaky_items()))
+    assert sent_first == 1
 
     await enqueue_delivery(delivery_id, event_id, endpoint_id)
     await asyncio.sleep(4)
 
     # Already 'delivered' → the worker drops the duplicate without re-sending.
-    assert len(await _flaky_items()) == sent_first
+    assert len(_mine(await _flaky_items())) == sent_first
     assert len(await _attempts(delivery_id)) == 1
 
 

@@ -12,6 +12,7 @@ from relay.api.schemas import DeliveryStatusOut, EventAccepted, EventCreate, Eve
 from relay.db.engine import get_session
 from relay.db.models import Delivery, Endpoint, Event, Tenant
 from relay.delivery.enqueue import enqueue_delivery
+from relay.delivery.ordering import enqueue_ordered
 from relay.observability import get_logger
 
 router = APIRouter(prefix="/v1/events", tags=["events"])
@@ -89,7 +90,13 @@ async def ingest_event(
     # Enqueue only after commit so a worker can never see a delivery_id that
     # isn't in Postgres yet. If XADD fails the rows stay 'pending' and are
     # picked up by the recovery sweep (Phase 3 scheduler).
+    ordering_by_endpoint = {e.id: e.ordering for e in matching}
     for delivery in deliveries:
+        if ordering_by_endpoint.get(delivery.endpoint_id) == "ordered":
+            # RPUSH before XADD: the worker woken by the stream entry must be
+            # able to see this delivery in the FIFO queue, or it would find an
+            # empty head and skip its turn.
+            await enqueue_ordered(delivery.endpoint_id, delivery.id)
         await enqueue_delivery(delivery.id, event.id, delivery.endpoint_id)
 
     log.info(
