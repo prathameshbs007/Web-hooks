@@ -47,6 +47,9 @@ services:
 
   worker:
     build: .
+    # Defense in depth: the worker supervises its own shard tasks, but if the
+    # process ever does exit, Docker brings it back.
+    restart: unless-stopped
     env_file:
       - path: .env
         required: false

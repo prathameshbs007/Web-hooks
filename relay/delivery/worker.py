@@ -5,9 +5,9 @@ import signal
 import uuid
 
 import httpx
-from redis.exceptions import ResponseError
+from redis.exceptions import RedisError, ResponseError
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from relay.config import get_settings
 from relay.db.engine import get_engine, get_session_factory
@@ -20,6 +20,17 @@ log = get_logger(__name__)
 
 CONSUMER_GROUP = "workers"
 BLOCK_MS = 2000
+
+# Redis outage handling: retry with capped exponential backoff rather than
+# letting the shard task die. A blip must never wedge the worker.
+RECONNECT_BASE_DELAY_S = 0.5
+RECONNECT_MAX_DELAY_S = 10.0
+
+# Entries a dead worker consumed but never ACKed are reclaimed after this long.
+# Must exceed the delivery timeout so we don't steal in-flight work from a
+# healthy peer.
+RECLAIM_MIN_IDLE_MS = 60_000
+RECLAIM_INTERVAL_S = 30.0
 
 
 async def ensure_group(shard: int) -> None:
@@ -102,38 +113,148 @@ async def process_delivery(
     return True
 
 
+async def handle_message(
+    key: str,
+    message_id: str,
+    fields: dict,
+    session_factory: async_sessionmaker[AsyncSession],
+    client: httpx.AsyncClient,
+) -> None:
+    """Process one stream entry, ACKing only after the attempt row commits."""
+    delivery_id = uuid.UUID(fields["delivery_id"])
+    try:
+        async with session_factory() as session:
+            should_ack = await process_delivery(session, client, delivery_id)
+    except Exception as exc:
+        # Leave the entry unACKed: it stays in the PEL and is picked up by
+        # reclaim_stale() once it goes idle, rather than being lost.
+        log.error(
+            "delivery_processing_failed",
+            delivery_id=str(delivery_id),
+            error=str(exc),
+            exc_info=True,
+        )
+        return
+    if should_ack:
+        # ACK only after the attempt row is committed — at-least-once.
+        await get_redis().xack(key, CONSUMER_GROUP, message_id)
+
+
+async def reclaim_stale(
+    key: str,
+    consumer_name: str,
+    session_factory: async_sessionmaker[AsyncSession],
+    client: httpx.AsyncClient,
+) -> int:
+    """Take over entries a crashed worker consumed but never ACKed.
+
+    Without this, a worker that dies mid-delivery strands its in-flight entries
+    in the pending-entries list forever and the delivery is silently lost.
+    """
+    redis = get_redis()
+    cursor = "0-0"
+    reclaimed = 0
+    while True:
+        cursor, messages, _deleted = await redis.xautoclaim(
+            key,
+            CONSUMER_GROUP,
+            consumer_name,
+            min_idle_time=RECLAIM_MIN_IDLE_MS,
+            start_id=cursor,
+            count=10,
+        )
+        for message_id, fields in messages:
+            log.warning("reclaimed_stale_entry", stream=key, message_id=message_id)
+            await handle_message(key, message_id, fields, session_factory, client)
+            reclaimed += 1
+        if cursor == "0-0" or not messages:
+            break
+    return reclaimed
+
+
 async def consume_shard(
     shard: int, consumer_name: str, client: httpx.AsyncClient, stop: asyncio.Event
 ) -> None:
+    """Consume one shard forever, surviving Redis outages.
+
+    Every Redis call is inside the retry envelope: a connection error backs off
+    and retries instead of killing the task, because a dead task is invisible —
+    the process keeps running and silently stops delivering.
+    """
     key = stream_key(shard)
-    redis = get_redis()
     session_factory = get_session_factory()
+    delay = RECONNECT_BASE_DELAY_S
+    loop = asyncio.get_running_loop()
+    next_reclaim = loop.time()
 
     while not stop.is_set():
-        entries = await redis.xreadgroup(
-            CONSUMER_GROUP, consumer_name, {key: ">"}, count=1, block=BLOCK_MS
-        )
-        if not entries:
-            continue
-        for _stream, messages in entries:
-            for message_id, fields in messages:
-                delivery_id = uuid.UUID(fields["delivery_id"])
-                try:
-                    async with session_factory() as session:
-                        should_ack = await process_delivery(session, client, delivery_id)
-                except Exception as exc:
-                    # Leave the entry pending: it stays in the PEL and can be
-                    # reclaimed rather than silently dropped.
-                    log.error(
-                        "delivery_processing_failed",
-                        delivery_id=str(delivery_id),
-                        error=str(exc),
-                        exc_info=True,
-                    )
+        try:
+            if loop.time() >= next_reclaim:
+                await reclaim_stale(key, consumer_name, session_factory, client)
+                next_reclaim = loop.time() + RECLAIM_INTERVAL_S
+
+            entries = await get_redis().xreadgroup(
+                CONSUMER_GROUP, consumer_name, {key: ">"}, count=1, block=BLOCK_MS
+            )
+            delay = RECONNECT_BASE_DELAY_S  # a successful call resets backoff
+            for _stream, messages in entries or []:
+                for message_id, fields in messages:
+                    await handle_message(key, message_id, fields, session_factory, client)
+        except asyncio.CancelledError:
+            raise
+        except (RedisError, OSError) as exc:
+            # Covers restarts, network blips, and NOGROUP after a Redis wipe.
+            log.warning(
+                "redis_unavailable_retrying",
+                shard=shard,
+                error=str(exc),
+                retry_in_s=delay,
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, RECONNECT_MAX_DELAY_S)
+            # The group may not exist anymore if Redis lost its data.
+            with contextlib.suppress(Exception):
+                await ensure_group(shard)
+
+
+async def supervise_shards(
+    consumer_name: str, client: httpx.AsyncClient, stop: asyncio.Event
+) -> None:
+    """Keep one live task per shard, restarting any that dies unexpectedly.
+
+    consume_shard already survives Redis errors, so reaching here means an
+    unforeseen bug. Restarting (loudly) beats the alternative: a process that
+    reports healthy while delivering nothing.
+    """
+    settings = get_settings()
+    tasks: dict[asyncio.Task, int] = {}
+
+    def spawn(shard: int) -> None:
+        tasks[asyncio.create_task(consume_shard(shard, consumer_name, client, stop))] = shard
+
+    for shard in range(settings.stream_shards):
+        spawn(shard)
+
+    try:
+        while not stop.is_set():
+            done, _pending = await asyncio.wait(
+                tasks.keys(), timeout=5.0, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                shard = tasks.pop(task)
+                if stop.is_set():
                     continue
-                if should_ack:
-                    # ACK only after the attempt row is committed — at-least-once.
-                    await redis.xack(key, CONSUMER_GROUP, message_id)
+                exc = task.exception() if not task.cancelled() else None
+                log.error(
+                    "shard_task_died_restarting",
+                    shard=shard,
+                    error=str(exc) if exc else "exited without error",
+                )
+                spawn(shard)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks.keys(), return_exceptions=True)
 
 
 async def run_worker() -> None:
@@ -142,7 +263,8 @@ async def run_worker() -> None:
     consumer_name = f"worker-{os.getpid()}-{uuid.uuid4().hex[:6]}"
 
     for shard in range(settings.stream_shards):
-        await ensure_group(shard)
+        with contextlib.suppress(Exception):
+            await ensure_group(shard)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -155,14 +277,7 @@ async def run_worker() -> None:
     timeout = httpx.Timeout(settings.delivery_timeout_seconds)
     limits = httpx.Limits(max_connections=settings.worker_concurrency)
     async with httpx.AsyncClient(timeout=timeout, limits=limits, follow_redirects=False) as client:
-        tasks = [
-            asyncio.create_task(consume_shard(shard, consumer_name, client, stop))
-            for shard in range(settings.stream_shards)
-        ]
-        await stop.wait()
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await supervise_shards(consumer_name, client, stop)
 
     await close_redis()
     await get_engine().dispose()

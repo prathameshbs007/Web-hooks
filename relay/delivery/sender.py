@@ -37,8 +37,8 @@ def classify_exception(exc: Exception) -> str:
         if "name or service not known" in message or "getaddrinfo" in message:
             return "dns"
         return "conn_refused"
-    if isinstance(exc, httpx.ConnectTimeout):
-        return "timeout"
+    # Everything else — including RemoteProtocolError (peer closed mid-response
+    # or spoke malformed HTTP) — is a connection-level failure, not a status.
     return "conn_refused"
 
 

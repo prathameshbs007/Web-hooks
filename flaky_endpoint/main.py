@@ -41,6 +41,26 @@ state: dict = {
 }
 
 
+class _TruncatedResponse(Response):
+    """Promise a body, then close without sending it.
+
+    Raising ConnectionResetError inside a handler doesn't reach the wire —
+    uvicorn catches it and returns a normal HTTP 500, which is indistinguishable
+    from the http_500 mode. Breaking the response at the protocol level is what
+    actually surfaces to the sender as a transport error.
+    """
+
+    async def __call__(self, scope, receive, send) -> None:
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-length", b"100"), (b"content-type", b"text/plain")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+
 class Configure(BaseModel):
     mode: Mode
     param: float | None = None
@@ -119,8 +139,7 @@ async def hook(request: Request) -> Response:
         await asyncio.sleep(state["param"] or 8)
         return Response(status_code=200, content='{"ok":true}', media_type="application/json")
     if mode == "conn_reset":
-        # Closing without a response surfaces to the sender as a connection error.
-        raise ConnectionResetError("simulated connection reset")
+        return _TruncatedResponse()
     if mode == "flaky":
         import random
 

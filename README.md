@@ -58,6 +58,17 @@ At-least-once. Workers ACK a stream entry only after the attempt row is
 committed, so a crash mid-delivery replays the entry rather than losing it —
 receivers should deduplicate on `Relay-Event-Id`.
 
+Two mechanisms make that guarantee hold in practice:
+
+- **Redis outages are retried, not fatal.** Every Redis call in the consume loop
+  sits inside a backoff-retry envelope. A dead shard task is invisible — the
+  process keeps running and silently stops delivering — so the worker also
+  supervises its tasks and restarts any that exit unexpectedly.
+- **Abandoned entries are reclaimed.** A worker that dies mid-delivery leaves its
+  entry in the consumer group's pending list. Peers `XAUTOCLAIM` entries idle
+  longer than 60s (comfortably above the 10s delivery timeout, so live work is
+  never stolen) and finish them.
+
 Full specification and build phases: [CLAUDE.md](CLAUDE.md).
 This README grows with each phase (architecture, signing verification, ordering
 tradeoffs, load numbers, agent design).
