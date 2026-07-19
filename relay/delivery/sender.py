@@ -17,6 +17,8 @@ class AttemptResult:
     http_status: int | None
     error_class: str | None
     response_snippet: str | None
+    # Raw Retry-After header, if the receiver sent one (429s especially).
+    retry_after: str | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -99,4 +101,5 @@ async def send_delivery(
         http_status=response.status_code,
         error_class=classify_status(response.status_code),
         response_snippet=response.text[:RESPONSE_SNIPPET_LIMIT],
+        retry_after=response.headers.get("Retry-After"),
     )

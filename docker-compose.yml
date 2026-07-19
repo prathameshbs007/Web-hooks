@@ -12,10 +12,15 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
+      # -h 127.0.0.1 forces a TCP probe. Without it pg_isready checks the unix
+      # socket, which answers during initdb's temporary server — so on a fresh
+      # volume dependents start, then hit connection-refused when postgres
+      # restarts for real.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U relay -d relay"]
       interval: 2s
       timeout: 3s
-      retries: 15
+      retries: 30
+      start_period: 10s
 
   redis:
     image: redis:7
@@ -37,8 +42,12 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://relay:relay@postgres:5432/relay
       REDIS_URL: redis://redis:6379/0
-    # Run migrations before serving; safe to re-run on every start.
-    command: sh -c "alembic upgrade head && uvicorn relay.api.main:app --host 0.0.0.0 --port 8000"
+    # Run migrations before serving; safe to re-run on every start. Retried
+    # because a healthy-but-just-booted postgres can still refuse the first
+    # connection.
+    command: >
+      sh -c "for i in 1 2 3 4 5; do alembic upgrade head && break || sleep 3; done &&
+             uvicorn relay.api.main:app --host 0.0.0.0 --port 8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,6 +69,22 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  retry-scheduler:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://relay:relay@postgres:5432/relay
+      REDIS_URL: redis://redis:6379/0
+    command: python -m relay.delivery.retry_scheduler
+    depends_on:
       redis:
         condition: service_healthy
       api:

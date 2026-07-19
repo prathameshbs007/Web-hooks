@@ -3,6 +3,7 @@ import contextlib
 import os
 import signal
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from redis.exceptions import RedisError, ResponseError
@@ -13,6 +14,8 @@ from relay.config import get_settings
 from relay.db.engine import get_engine, get_session_factory
 from relay.db.models import Delivery, DeliveryAttempt, Endpoint, Event
 from relay.delivery.enqueue import close_redis, get_redis, stream_key
+from relay.delivery.retry import next_delay_seconds
+from relay.delivery.retry_queue import schedule_retry
 from relay.delivery.sender import send_delivery
 from relay.observability import get_logger, setup_logging
 
@@ -95,9 +98,34 @@ async def process_delivery(
             response_snippet=result.response_snippet,
         )
     )
-    # Phase 3 replaces 'failed' with backoff scheduling / DLQ transitions.
-    delivery.status = "delivered" if result.succeeded else "failed"
+
+    delay_seconds: float | None = None
+    if result.succeeded:
+        delivery.status = "delivered"
+        delivery.next_attempt_at = None
+    else:
+        delay_seconds = next_delay_seconds(
+            attempt_number,
+            http_status=result.http_status,
+            retry_after=result.retry_after,
+            configured_max=get_settings().max_attempts,
+        )
+        if delay_seconds is None:
+            # Attempts exhausted (or a terminal 4xx) → DLQ.
+            delivery.status = "dead"
+            delivery.next_attempt_at = None
+        else:
+            # 'failed' + next_attempt_at means "awaiting retry"; the scheduler
+            # owns the re-enqueue, so nothing else writes to this row meanwhile.
+            delivery.status = "failed"
+            delivery.next_attempt_at = datetime.now(UTC) + timedelta(seconds=delay_seconds)
+
     await session.commit()
+
+    # Schedule after the commit: the row must already say 'failed' before the
+    # delivery can be picked up again, or a fast retry could race the write.
+    if delay_seconds is not None:
+        await schedule_retry(delivery.id, event.id, endpoint.id, delay_seconds)
 
     log.info(
         "delivery_attempted",
@@ -109,7 +137,17 @@ async def process_delivery(
         http_status=result.http_status,
         error_class=result.error_class,
         latency_ms=result.latency_ms,
+        retry_in_s=round(delay_seconds, 2) if delay_seconds is not None else None,
     )
+    if delivery.status == "dead":
+        log.warning(
+            "delivery_dead_lettered",
+            delivery_id=str(delivery.id),
+            endpoint_id=str(endpoint.id),
+            attempts=attempt_number,
+            last_error=result.error_class,
+            last_http_status=result.http_status,
+        )
     return True
 
 

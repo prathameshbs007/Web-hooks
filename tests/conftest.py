@@ -54,17 +54,26 @@ def migrated():
     command.upgrade(Config("alembic.ini"), "head")
 
 
+@pytest.fixture(autouse=True)
+async def _reset_shared_clients():
+    """Drop process-wide clients after every test.
+
+    pytest-asyncio gives each test its own event loop, but the SQLAlchemy pool
+    and the shared redis client bind connections to the loop that created them.
+    Reusing them from a later test raises "Event loop is closed", so tear them
+    down between tests regardless of which fixtures the test used.
+    """
+    yield
+    from relay.db.engine import get_engine
+    from relay.delivery.enqueue import close_redis
+
+    await get_engine().dispose()
+    await close_redis()
+
+
 @pytest.fixture
 async def api_client(migrated):
     app = create_app()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
-    # pytest-asyncio gives every test its own event loop, but the engine's pool
-    # and the shared redis client bind connections to the loop they were created
-    # on — drop them so the next test starts clean.
-    from relay.db.engine import get_engine
-    from relay.delivery.enqueue import close_redis
-
-    await get_engine().dispose()
-    await close_redis()

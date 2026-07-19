@@ -66,6 +66,37 @@ class DeliveryStatusOut(BaseModel):
     attempt_count: int
 
 
+class DeliveryOut(BaseModel):
+    id: uuid.UUID
+    event_id: uuid.UUID
+    endpoint_id: uuid.UUID
+    status: str
+    attempt_count: int
+    next_attempt_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AttemptOut(BaseModel):
+    attempt_number: int
+    started_at: datetime
+    latency_ms: int
+    http_status: int | None
+    error_class: str | None
+    response_snippet: str | None
+
+
+class ReplayRequest(BaseModel):
+    endpoint_id: uuid.UUID
+    # Omit to replay every dead delivery for the endpoint.
+    delivery_ids: list[uuid.UUID] | None = None
+
+
+class ReplayResult(BaseModel):
+    replayed: int
+    delivery_ids: list[uuid.UUID]
+
+
 class EventOut(BaseModel):
     id: uuid.UUID
     event_type: str

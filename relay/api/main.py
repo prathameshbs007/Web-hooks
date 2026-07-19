@@ -8,7 +8,7 @@ from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from relay.api.errors import ApiError
-from relay.api.routes import endpoints, events, tenants
+from relay.api.routes import deliveries, dlq, endpoints, events, tenants
 from relay.config import get_settings
 from relay.db.engine import get_engine
 from relay.observability import get_logger, setup_logging
@@ -57,6 +57,8 @@ def create_app() -> FastAPI:
     app.include_router(tenants.router)
     app.include_router(endpoints.router)
     app.include_router(events.router)
+    app.include_router(deliveries.router)
+    app.include_router(dlq.router)
 
     @app.exception_handler(ApiError)
     async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
