@@ -21,6 +21,7 @@ from relay.delivery.rate_limit import acquire_slot, release_slot, take_token
 from relay.delivery.retry import next_delay_seconds
 from relay.delivery.retry_queue import schedule_retry
 from relay.delivery.sender import send_delivery
+from relay.metrics import deliveries_gated, record_delivery, serve_metrics
 from relay.observability import get_logger, setup_logging
 
 log = get_logger(__name__)
@@ -46,6 +47,9 @@ RATE_LIMIT_RETRY_DELAY_S = 0.5
 CONCURRENCY_RETRY_DELAY_S = 0.5
 ORDERED_WAIT_S = 0.25
 BREAKER_RECHECK_DELAY_S = 30.0
+
+# Prometheus scrapes the worker directly; it has no HTTP server otherwise.
+WORKER_METRICS_PORT = 9100
 
 
 async def ensure_group(shard: int) -> None:
@@ -151,6 +155,9 @@ async def process_delivery(
         latency_ms=result.latency_ms,
         retry_in_s=round(delay_seconds, 2) if delay_seconds is not None else None,
     )
+    record_delivery(
+        str(endpoint.tenant_id), delivery.status, result.latency_ms / 1000.0
+    )
     if delivery.status == "dead":
         log.warning(
             "delivery_dead_lettered",
@@ -237,6 +244,7 @@ async def deliver_with_gates(
         lock_token = await acquire_lock(endpoint.id)
         if lock_token is None:
             # Another worker is delivering for this endpoint; try again shortly.
+            deliveries_gated.labels(reason="ordered_wait").inc()
             await defer_delivery(delivery.id, delivery.event_id, endpoint.id, ORDERED_WAIT_S)
             return True
         head = await peek_head(endpoint.id)
@@ -244,6 +252,7 @@ async def deliver_with_gates(
             # Not our turn. Wait behind the head — this is the head-of-line
             # blocking that 'ordered' explicitly trades throughput for.
             await release_lock(endpoint.id, lock_token)
+            deliveries_gated.labels(reason="ordered_wait").inc()
             await defer_delivery(delivery.id, delivery.event_id, endpoint.id, ORDERED_WAIT_S)
             return True
 
@@ -258,6 +267,7 @@ async def deliver_with_gates(
                 reason=reason,
                 retry_in_s=retry_in,
             )
+            deliveries_gated.labels(reason=reason or "unknown").inc()
             await defer_delivery(delivery.id, delivery.event_id, endpoint.id, retry_in)
             return True
 
@@ -275,6 +285,7 @@ async def deliver_with_gates(
                 reason="max_inflight",
                 retry_in_s=CONCURRENCY_RETRY_DELAY_S,
             )
+            deliveries_gated.labels(reason="max_inflight").inc()
             await defer_delivery(
                 delivery.id, delivery.event_id, endpoint.id, CONCURRENCY_RETRY_DELAY_S
             )
@@ -457,7 +468,13 @@ async def run_worker() -> None:
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
 
-    log.info("worker_started", consumer=consumer_name, shards=settings.stream_shards)
+    serve_metrics(WORKER_METRICS_PORT)
+    log.info(
+        "worker_started",
+        consumer=consumer_name,
+        shards=settings.stream_shards,
+        metrics_port=WORKER_METRICS_PORT,
+    )
 
     timeout = httpx.Timeout(settings.delivery_timeout_seconds)
     limits = httpx.Limits(max_connections=settings.worker_concurrency)

@@ -21,15 +21,18 @@ pytestmark = requires_infra
 
 ADMIN = {"Authorization": "Bearer change-me"}
 # As seen by the worker container (compose service DNS), not by the test host.
-FLAKY_HOOK = "http://flaky-endpoint:9000/hook"
+# The /{mode} suffix pins behavior per request, so a slow or failing endpoint in
+# one test cannot change how another test's endpoint behaves.
+FLAKY_BASE = "http://flaky-endpoint:9000/hook"
 
 
-async def _configure_flaky(mode: str, secret: str | None = None, param=None) -> None:
+def hook_url(mode: str) -> str:
+    return f"{FLAKY_BASE}/{mode}"
+
+
+async def _set_secret(secret: str) -> None:
     async with httpx.AsyncClient(base_url=FLAKY_URL, timeout=10) as client:
-        await client.post("/reset")
-        await client.post("/configure", json={"mode": mode, "param": param})
-        if secret is not None:
-            await client.post("/secret", json={"secret": secret})
+        await client.post("/secret", json={"secret": secret})
 
 
 async def _flaky_items() -> list[dict]:
@@ -37,14 +40,15 @@ async def _flaky_items() -> list[dict]:
         return (await client.get("/received")).json()["items"]
 
 
-async def _setup_tenant_endpoint(api_client) -> tuple[dict, dict]:
+async def _setup_tenant_endpoint(api_client, mode: str = "healthy") -> tuple[dict, dict]:
     tenant = (
         await api_client.post("/v1/tenants", json={"name": "phase2"}, headers=ADMIN)
     ).json()
     auth = {"Authorization": f"Bearer {tenant['api_key']}"}
     endpoint = (
-        await api_client.post("/v1/endpoints", json={"url": FLAKY_HOOK}, headers=auth)
+        await api_client.post("/v1/endpoints", json={"url": hook_url(mode)}, headers=auth)
     ).json()
+    await _set_secret(endpoint["signing_secret"])
     return auth, endpoint
 
 
@@ -93,8 +97,7 @@ async def _attempts(delivery_id: uuid.UUID) -> list[DeliveryAttempt]:
 
 
 async def test_e2e_healthy_endpoint_receives_valid_signature(api_client):
-    auth, endpoint = await _setup_tenant_endpoint(api_client)
-    await _configure_flaky("healthy", secret=endpoint["signing_secret"])
+    auth, _endpoint = await _setup_tenant_endpoint(api_client, "healthy")
 
     event_id, delivery_id, _ = await _ingest(api_client, auth, {"amount": 42})
     delivery = await _wait_for_status(delivery_id, {"delivered"})
@@ -118,8 +121,7 @@ async def test_e2e_healthy_endpoint_receives_valid_signature(api_client):
 
 
 async def test_e2e_failing_endpoint_records_failed_attempt(api_client):
-    auth, endpoint = await _setup_tenant_endpoint(api_client)
-    await _configure_flaky("http_500", secret=endpoint["signing_secret"])
+    auth, _endpoint = await _setup_tenant_endpoint(api_client, "http_500")
 
     _event_id, delivery_id, _ = await _ingest(api_client, auth)
     await _wait_for_status(delivery_id, {"failed"})
@@ -133,16 +135,19 @@ async def test_e2e_failing_endpoint_records_failed_attempt(api_client):
 
 async def test_ack_after_commit_means_exactly_one_attempt(api_client):
     """The entry is ACKed only after the attempt commits, so it isn't reprocessed."""
-    auth, endpoint = await _setup_tenant_endpoint(api_client)
-    await _configure_flaky("healthy", secret=endpoint["signing_secret"])
+    auth, _endpoint = await _setup_tenant_endpoint(api_client, "healthy")
 
     _event_id, delivery_id, _ = await _ingest(api_client, auth)
     await _wait_for_status(delivery_id, {"delivered"})
 
-    sent_first = len(await _flaky_items())
+    def _mine(items):
+        # Scope to this delivery: the receiver is shared with other tests.
+        return [i for i in items if i["delivery_id"] == str(delivery_id)]
+
+    sent_first = len(_mine(await _flaky_items()))
     # Give the worker time to redeliver if the ACK had been mishandled.
     await asyncio.sleep(3)
-    assert len(await _flaky_items()) == sent_first
+    assert len(_mine(await _flaky_items())) == sent_first == 1
     assert len(await _attempts(delivery_id)) == 1
 
 
@@ -150,8 +155,7 @@ async def test_duplicate_stream_entry_does_not_resend(api_client):
     """At-least-once means duplicates happen; the worker must be idempotent."""
     from relay.delivery.enqueue import enqueue_delivery
 
-    auth, endpoint = await _setup_tenant_endpoint(api_client)
-    await _configure_flaky("healthy", secret=endpoint["signing_secret"])
+    auth, _endpoint = await _setup_tenant_endpoint(api_client, "healthy")
 
     event_id, delivery_id, endpoint_id = await _ingest(api_client, auth)
     await _wait_for_status(delivery_id, {"delivered"})
@@ -173,8 +177,7 @@ async def test_duplicate_stream_entry_does_not_resend(api_client):
 
 async def test_timeout_is_recorded_as_timeout_error_class(api_client):
     """10s httpx timeout: a 30s receiver sleep must classify as 'timeout'."""
-    auth, endpoint = await _setup_tenant_endpoint(api_client)
-    await _configure_flaky("timeout", secret=endpoint["signing_secret"], param=30)
+    auth, _endpoint = await _setup_tenant_endpoint(api_client, "timeout")
 
     _event_id, delivery_id, _ = await _ingest(api_client, auth)
     await _wait_for_status(delivery_id, {"failed"}, wait_s=40.0)

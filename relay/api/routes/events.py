@@ -13,6 +13,7 @@ from relay.db.engine import get_session
 from relay.db.models import Delivery, Endpoint, Event, Tenant
 from relay.delivery.enqueue import enqueue_delivery
 from relay.delivery.ordering import enqueue_ordered
+from relay.metrics import events_ingested
 from relay.observability import get_logger
 
 router = APIRouter(prefix="/v1/events", tags=["events"])
@@ -99,6 +100,7 @@ async def ingest_event(
             await enqueue_ordered(delivery.endpoint_id, delivery.id)
         await enqueue_delivery(delivery.id, event.id, delivery.endpoint_id)
 
+    events_ingested.labels(tenant=str(tenant.id)).inc()
     log.info(
         "event_ingested",
         event_id=str(event.id),

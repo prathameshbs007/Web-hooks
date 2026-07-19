@@ -69,6 +69,52 @@ Two mechanisms make that guarantee hold in practice:
   longer than 60s (comfortably above the 10s delivery timeout, so live work is
   never stolen) and finish them.
 
+## Observability
+
+`docker compose up` brings up Prometheus (`:9090`) and Grafana (`:3000`, anonymous
+viewer access) with the **Relay — Delivery Overview** dashboard provisioned:
+ingestion rate, delivery outcomes, success rate, latency percentiles, retry-queue
+depth, DLQ by tenant, breaker map, and gated-delivery reasons.
+
+Three scrape targets: `api:8000/metrics`, `worker:9100/metrics`,
+`retry-scheduler:9101/metrics`. The worker and scheduler have no HTTP server of
+their own, so each starts a `prometheus_client` endpoint purely for scraping.
+
+Label cardinality is deliberate: `tenant` on counters, `endpoint` **only** on the
+breaker and DLQ gauges (bounded by how many endpoints are unhealthy, not by fleet
+size). Point-in-time gauges are refreshed by the scheduler every 5s rather than
+computed per scrape, so `/metrics` can't be turned into a DB load generator.
+
+### Measured load numbers
+
+Dev hardware (Windows 11, Docker Desktop, single worker container, all services
+plus Postgres/Redis/Prometheus/Grafana on one machine). Load via
+`scripts/loadtest/locustfile.py`, each simulated user provisioning its own tenant:
+
+| Metric | Result | Target |
+|---|---|---|
+| Sustained ingestion | **273 events/sec** (20,293 events / 75s) | ≥ 100/sec |
+| **Delivery p95** | **9.8 ms** | < 1 s |
+| Delivery p50 / p99 | 5.3 ms / 23.4 ms | — |
+| Ingestion p95 (`POST /v1/events`) | 190 ms | — |
+| Failures | **0** across 33,612 events | — |
+| Retry queue / DLQ at steady state | 0 / 0 | — |
+
+Reproduce:
+
+```sh
+docker compose up -d
+ADMIN_TOKEN=change-me locust -f scripts/loadtest/locustfile.py \
+  --host http://localhost:8000 --users 50 --spawn-rate 25 --run-time 60s --headless
+```
+
+Then watch http://localhost:3000 during the run.
+
+Delivery latency is low because the receiver is the local `flaky-endpoint`
+container — this measures Relay's overhead, not real-world network time. The
+honest reading: Relay adds single-digit milliseconds on top of whatever the
+customer's endpoint costs.
+
 ## Choosing an ordering mode
 
 Set `ordering` when creating an endpoint. The choice is a real tradeoff, not a

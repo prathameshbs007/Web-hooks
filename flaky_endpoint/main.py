@@ -97,8 +97,23 @@ async def reset() -> dict:
     return {"ok": True}
 
 
+@app.post("/hook/{mode_override}")
+async def hook_with_mode(mode_override: Mode, request: Request) -> Response:
+    """Same as /hook but pins the behavior for this request only.
+
+    Lets concurrent tests target different behaviors without fighting over the
+    global mode — a `timeout` test would otherwise make every other endpoint's
+    deliveries sleep too, starving the workers.
+    """
+    return await _handle(request, mode_override)
+
+
 @app.post("/hook")
 async def hook(request: Request) -> Response:
+    return await _handle(request, state["mode"])
+
+
+async def _handle(request: Request, mode: str) -> Response:
     raw_body = await request.body()
 
     # --- reference receiver verification ---
@@ -122,7 +137,6 @@ async def hook(request: Request) -> Response:
         }
     )
 
-    mode = state["mode"]
     if mode == "healthy":
         return Response(status_code=200, content='{"ok":true}', media_type="application/json")
     if mode == "http_500":

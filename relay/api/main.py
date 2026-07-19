@@ -4,6 +4,7 @@ import redis.asyncio as aioredis
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -73,6 +74,10 @@ def create_app() -> FastAPI:
         request: Request, exc: StarletteHTTPException
     ) -> JSONResponse:
         return _error_response(exc.status_code, "http_error", str(exc.detail))
+
+    @app.get("/metrics")
+    async def metrics() -> Response:
+        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     @app.get("/healthz")
     async def healthz(response: Response) -> dict:
