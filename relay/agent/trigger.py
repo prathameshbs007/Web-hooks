@@ -98,21 +98,34 @@ async def diagnose_and_record(endpoint_id: uuid.UUID, triggered_by: str) -> uuid
 
 
 async def handle_breaker_event(payload: str) -> None:
+    """React to the two diagnosis triggers on the channel (spec §8)."""
     try:
         event = json.loads(payload)
     except json.JSONDecodeError:
         log.warning("agent_bad_breaker_event", payload=payload[:200])
         return
-    if event.get("to_state") != "open":
-        return  # only an opening breaker is worth a diagnosis
+
+    if event.get("to_state") == "open":
+        triggered_by = "breaker_open"
+    elif event.get("trigger") == "consecutive_failures":
+        triggered_by = "consecutive_failures"
+    else:
+        return  # breaker closing/half-opening, or an unrelated event
 
     endpoint_id = uuid.UUID(event["endpoint_id"])
+    # Budget guard also dedupes the two triggers: if 5-failures already ran a
+    # diagnosis this hour, the breaker opening at 10 is skipped as rate-limited.
     allowed, reason = await claim_budget(endpoint_id)
     if not allowed:
-        log.info("agent_trigger_skipped", endpoint_id=str(endpoint_id), reason=reason)
+        log.info(
+            "agent_trigger_skipped",
+            endpoint_id=str(endpoint_id),
+            reason=reason,
+            triggered_by=triggered_by,
+        )
         agent_runs.labels(outcome=f"skipped_{reason}").inc()
         return
-    await diagnose_and_record(endpoint_id, "breaker_open")
+    await diagnose_and_record(endpoint_id, triggered_by)
 
 
 async def run_trigger(stop: asyncio.Event | None = None) -> None:

@@ -6,6 +6,7 @@ import uuid
 
 from relay.delivery.circuit_breaker import (
     CONSECUTIVE_FAILURE_THRESHOLD,
+    CONSECUTIVE_FAILURE_TRIGGER,
     HALF_OPEN_PROBE_INTERVAL_SECONDS,
     WINDOW_MIN_ATTEMPTS,
     allow_request,
@@ -247,23 +248,111 @@ async def test_breaker_transitions_publish_events():
     for i in range(CONSECUTIVE_FAILURE_THRESHOLD):
         await record_outcome(endpoint, success=False, now=now + i)
 
-    received = []
+    import json
+
+    # Driving 10 failures now publishes two events — a consecutive_failures
+    # trigger at 5 and the breaker-open transition at 10 — so collect and pick
+    # the open transition rather than assuming it is first.
+    events = []
     deadline = asyncio.get_running_loop().time() + 5
     while asyncio.get_running_loop().time() < deadline:
         msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
         if msg:
-            received.append(msg["data"])
-            break
+            events.append(json.loads(msg["data"]))
     await pubsub.unsubscribe("relay:breaker-events")
     await pubsub.aclose()
 
-    assert received, "opening the breaker must publish an event"
+    opened = [e for e in events if e.get("to_state") == "open"]
+    assert opened, "opening the breaker must publish an event"
+    assert opened[0]["endpoint_id"] == str(endpoint)
+    assert opened[0]["from_state"] == "closed"
+
+
+async def test_five_consecutive_failures_publishes_diagnosis_trigger():
+    """Spec §8: the agent is triggered at 5 consecutive failures, before the
+    breaker opens at 10."""
     import json
 
-    event = json.loads(received[0])
-    assert event["endpoint_id"] == str(endpoint)
-    assert event["to_state"] == "open"
-    assert event["from_state"] == "closed"
+    endpoint = uuid.uuid4()
+    await reset(endpoint)
+    pubsub = get_redis().pubsub()
+    await pubsub.subscribe("relay:breaker-events")
+    await asyncio.sleep(0.2)
+
+    now = time.time()
+    triggers = []
+    for i in range(CONSECUTIVE_FAILURE_TRIGGER):
+        await record_outcome(endpoint, success=False, now=now + i)
+    deadline = asyncio.get_running_loop().time() + 3
+    while asyncio.get_running_loop().time() < deadline:
+        msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+        if msg and json.loads(msg["data"]).get("trigger") == "consecutive_failures":
+            triggers.append(json.loads(msg["data"]))
+    await pubsub.unsubscribe("relay:breaker-events")
+    await pubsub.aclose()
+
+    assert len(triggers) == 1, "exactly one trigger at the 5th consecutive failure"
+    assert triggers[0]["endpoint_id"] == str(endpoint)
+    assert triggers[0]["consecutive"] == CONSECUTIVE_FAILURE_TRIGGER
+    # The breaker is still closed at 5 (it opens at 10).
+    assert (await get_state(endpoint))["state"] == "closed"
+
+
+async def test_a_success_before_five_failures_resets_the_trigger():
+    """Four failures then a success must not fire the 5-failure trigger."""
+    import json
+
+    endpoint = uuid.uuid4()
+    await reset(endpoint)
+    pubsub = get_redis().pubsub()
+    await pubsub.subscribe("relay:breaker-events")
+    await asyncio.sleep(0.2)
+
+    now = time.time()
+    for i in range(4):
+        await record_outcome(endpoint, success=False, now=now + i)
+    await record_outcome(endpoint, success=True, now=now + 4)  # streak broken
+    await record_outcome(endpoint, success=False, now=now + 5)
+
+    fired = False
+    deadline = asyncio.get_running_loop().time() + 2
+    while asyncio.get_running_loop().time() < deadline:
+        msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+        if msg and json.loads(msg["data"]).get("trigger") == "consecutive_failures":
+            fired = True
+    await pubsub.unsubscribe("relay:breaker-events")
+    await pubsub.aclose()
+
+    assert fired is False, "a broken streak must not reach 5 consecutive"
+
+
+async def test_agent_trigger_handles_consecutive_failures_event():
+    """The agent trigger recognises the consecutive_failures event (not just open)."""
+    from unittest.mock import AsyncMock
+
+    import relay.agent.trigger as trig
+
+    captured = {}
+
+    async def fake_diagnose(endpoint_id, triggered_by):
+        captured["endpoint_id"] = endpoint_id
+        captured["triggered_by"] = triggered_by
+
+    endpoint = uuid.uuid4()
+    orig_claim, orig_diag = trig.claim_budget, trig.diagnose_and_record
+    trig.claim_budget = AsyncMock(return_value=(True, None))
+    trig.diagnose_and_record = fake_diagnose
+    try:
+        import json
+
+        await trig.handle_breaker_event(
+            json.dumps({"endpoint_id": str(endpoint), "trigger": "consecutive_failures"})
+        )
+    finally:
+        trig.claim_budget, trig.diagnose_and_record = orig_claim, orig_diag
+
+    assert captured["triggered_by"] == "consecutive_failures"
+    assert captured["endpoint_id"] == endpoint
 
 
 async def test_breaker_state_is_per_endpoint():

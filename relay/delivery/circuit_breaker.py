@@ -16,6 +16,8 @@ from relay.delivery.enqueue import get_redis
 BREAKER_EVENTS_CHANNEL = "relay:breaker-events"
 
 CONSECUTIVE_FAILURE_THRESHOLD = 10
+# The agent starts diagnosing here — earlier than the breaker opens (spec §8).
+CONSECUTIVE_FAILURE_TRIGGER = 5
 WINDOW_SECONDS = 300
 WINDOW_MIN_ATTEMPTS = 20
 FAILURE_RATE_THRESHOLD = 0.5
@@ -160,11 +162,35 @@ async def record_outcome(endpoint_id: uuid.UUID, success: bool, now: float) -> d
             str(endpoint_id),
         ],
     )
-    return {
+    result = {
         "state": state,
         "consecutive": int(consecutive),
         "transitioned": transitioned == "true",
     }
+
+    # Spec §8: the agent also diagnoses at 5 consecutive failures, not only when
+    # the breaker opens (which is 10). Fire once, exactly as the counter crosses
+    # the threshold and while the breaker is still closed, so a diagnosis starts
+    # well before delivery is fully suspended. The Lua serialises the counter, so
+    # exactly one attempt observes the crossing — no double-publish. The run is
+    # budget-guarded downstream, so a redundant trigger is harmless anyway.
+    if (
+        not success
+        and result["consecutive"] == CONSECUTIVE_FAILURE_TRIGGER
+        and result["state"] == "closed"
+    ):
+        await get_redis().publish(
+            BREAKER_EVENTS_CHANNEL,
+            json.dumps(
+                {
+                    "endpoint_id": str(endpoint_id),
+                    "trigger": "consecutive_failures",
+                    "consecutive": result["consecutive"],
+                    "at": now,
+                }
+            ),
+        )
+    return result
 
 
 async def allow_request(endpoint_id: uuid.UUID, now: float) -> tuple[str, str]:
