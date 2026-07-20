@@ -171,6 +171,51 @@ curl -H "Authorization: Bearer $KEY" localhost:8000/v1/endpoints/$ID/breaker
 curl -X POST -H "Authorization: Bearer $KEY" localhost:8000/v1/endpoints/$ID/breaker/reset
 ```
 
+## Diagnosis agent
+
+When a circuit breaker opens, the agent (a LangGraph workflow:
+triage → investigate → hypothesize → **verify** → report) investigates why the
+endpoint is failing. It queries the attempt history, probes the endpoint with a
+signed synthetic delivery, and checks DNS/TLS, then writes a `diagnoses` row with
+a root-cause label, confidence, evidence, and a drafted customer email. The
+`verify` step is mandatory — a hypothesis never tested against a live probe is
+forced to `low` confidence in code, not left to the model's say-so.
+
+Mutating tools (`pause_endpoint`, `replay_dlq`) never act on their own: they
+record a pending `agent_actions` row that a human approves via
+`POST /v1/diagnoses/actions/{id}/approve`. Guardrails: at most one run per
+endpoint per hour, ten runs per day, and a per-run cost cap. Agent failure is
+isolated — it writes an `agent_error` diagnosis and never touches delivery.
+
+### Agent LLM options
+
+The agent's model is provider-neutral, selected by env var:
+
+| Var | Default | Notes |
+|---|---|---|
+| `LLM_PROVIDER` | `gemini` | `gemini` or `anthropic` |
+| `LLM_MODEL` | `gemini-2.5-flash` | any model the provider serves |
+| `LLM_API_KEY` | — | the provider's key |
+
+**Gemini (default).** Get a **free** key at
+[aistudio.google.com](https://aistudio.google.com) — no credit card. Put it in
+`.env` as `LLM_API_KEY=...` and restart the agent (`docker compose up -d agent`).
+Uses `langchain-google-genai`.
+
+**Anthropic (alternate).** Set `LLM_PROVIDER=anthropic`, `LLM_MODEL=claude-...`,
+`LLM_API_KEY=sk-ant-...`, and install the optional package:
+`pip install langchain-anthropic`. Billed via the Anthropic API (separate from a
+Claude Pro subscription).
+
+Both go through a small adapter that speaks the same interface to the graph, so
+the mocked golden tests are provider-independent and run for free in CI (the
+provider packages are imported only when a real run happens).
+
+> Free-tier models (e.g. `gemini-2.5-flash`) are capable but will generally
+> produce lower-confidence diagnoses than a frontier model, and the free tier is
+> rate-limited — the agent backs off and retries on 429, then fails the run
+> gracefully (an `agent_error` diagnosis; delivery is unaffected).
+
 Full specification and build phases: [CLAUDE.md](CLAUDE.md).
 This README grows with each phase (architecture, signing verification, ordering
 tradeoffs, load numbers, agent design).

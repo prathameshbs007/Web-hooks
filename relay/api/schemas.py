@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -94,6 +95,31 @@ class AttemptOut(BaseModel):
     http_status: int | None
     error_class: str | None
     response_snippet: str | None
+
+
+class DiagnosisOut(BaseModel):
+    id: uuid.UUID
+    endpoint_id: uuid.UUID
+    triggered_by: str
+    root_cause: str
+    confidence: str
+    evidence: dict
+    recommendation: str
+    draft_email: str
+    status: str
+    cost_usd: Decimal
+    created_at: datetime
+
+
+class ActionOut(BaseModel):
+    id: uuid.UUID
+    diagnosis_id: uuid.UUID
+    endpoint_id: uuid.UUID
+    action: str
+    reason: str
+    status: str
+    decided_at: datetime | None
+    created_at: datetime
 
 
 class ReplayRequest(BaseModel):

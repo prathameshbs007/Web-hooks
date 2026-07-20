@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
@@ -9,6 +10,7 @@ from sqlalchemy import (
     Identity,
     Index,
     Integer,
+    Numeric,
     Text,
     UniqueConstraint,
     func,
@@ -109,6 +111,65 @@ class Delivery(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class Diagnosis(Base):
+    """One agent run's conclusion about why an endpoint is failing."""
+
+    __tablename__ = "diagnoses"
+    __table_args__ = (
+        CheckConstraint("confidence IN ('low','medium','high')", name="ck_diagnoses_confidence"),
+        CheckConstraint(
+            "status IN ('open','acknowledged','resolved')", name="ck_diagnoses_status"
+        ),
+        Index("ix_diagnoses_endpoint_created", "endpoint_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    endpoint_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("endpoints.id", ondelete="CASCADE")
+    )
+    triggered_by: Mapped[str] = mapped_column(Text)
+    root_cause: Mapped[str] = mapped_column(Text)
+    confidence: Mapped[str] = mapped_column(Text)
+    evidence: Mapped[dict] = mapped_column(JSONB)
+    recommendation: Mapped[str] = mapped_column(Text)
+    draft_email: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'open'"))
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class AgentAction(Base):
+    """A mutating action the agent proposed. Never executed without approval."""
+
+    __tablename__ = "agent_actions"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('pause_endpoint','replay_dlq')", name="ck_agent_actions_action"
+        ),
+        CheckConstraint(
+            "status IN ('pending','approved','rejected')", name="ck_agent_actions_status"
+        ),
+        Index("ix_agent_actions_status", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    diagnosis_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("diagnoses.id", ondelete="CASCADE")
+    )
+    endpoint_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("endpoints.id", ondelete="CASCADE")
+    )
+    action: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'pending'"))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
     )
 
 

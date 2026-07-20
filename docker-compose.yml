@@ -90,6 +90,24 @@ services:
       api:
         condition: service_started
 
+  agent:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://relay:relay@postgres:5432/relay
+      REDIS_URL: redis://redis:6379/0
+    command: python -m relay.agent.trigger
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
   flaky-endpoint:
     build: .
     ports:

@@ -13,8 +13,10 @@ class Settings(BaseSettings):
 
     admin_token: str = "change-me"
 
-    anthropic_api_key: str = ""
-    agent_model: str = "claude-sonnet-4-6"
+    # Agent LLM provider (gemini by default; anthropic as an alternate).
+    llm_provider: str = "gemini"
+    llm_model: str = "gemini-2.5-flash"
+    llm_api_key: str = ""
     agent_max_runs_per_endpoint_per_hour: int = 1
     agent_max_runs_per_day: int = 10
 

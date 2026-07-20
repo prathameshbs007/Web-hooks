@@ -44,9 +44,15 @@ requires_infra = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="session", autouse=True)
 def migrated():
-    """Bring the localhost database to head before integration tests."""
+    """Bring the localhost database to head before any integration test.
+
+    Autouse so tests that hit the DB directly (not just via api_client) still
+    run against the latest schema.
+    """
+    if not infra_available():
+        return
     from alembic.config import Config
 
     from alembic import command

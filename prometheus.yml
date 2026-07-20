@@ -16,3 +16,7 @@ scrape_configs:
   - job_name: relay-retry-scheduler
     static_configs:
       - targets: ["retry-scheduler:9101"]
+
+  - job_name: relay-agent
+    static_configs:
+      - targets: ["agent:9102"]
