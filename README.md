@@ -202,6 +202,12 @@ The agent's model is provider-neutral, selected by env var:
 `.env` as `LLM_API_KEY=...` and restart the agent (`docker compose up -d agent`).
 Uses `langchain-google-genai`.
 
+Model note: the default is `gemini-3.1-flash-lite`. Newly created free keys
+**404** on `gemini-2.5-flash`, and the heavier preview models rate-limit hard on
+the free tier during a multi-call diagnosis. The adapter preserves Gemini 3.x
+`thought_signature` tokens across tool-call turns (required by those models), so
+any current Gemini flash model works — pick per your key's quota.
+
 **Anthropic (alternate).** Set `LLM_PROVIDER=anthropic`, `LLM_MODEL=claude-...`,
 `LLM_API_KEY=sk-ant-...`, and install the optional package:
 `pip install langchain-anthropic`. Billed via the Anthropic API (separate from a

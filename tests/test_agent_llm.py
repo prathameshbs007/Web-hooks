@@ -157,6 +157,52 @@ def test_message_translation_round_trips_tool_use():
     assert lc[3].tool_call_id == "c1"
 
 
+async def test_assistant_turn_is_replayed_verbatim_to_preserve_provider_state():
+    """A cached tool-call response must be echoed back as the same object.
+
+    Gemini 3.x attaches a thought_signature to each function call that the API
+    requires on replay; the adapter must resend the original AIMessage, not a
+    rebuild, or the second turn 400s.
+    """
+    from relay.agent.llm import _Block
+
+    first = FakeAI(
+        content="",
+        tool_calls=[{"name": "probe", "args": {}, "id": "sig-1", "type": "tool_call"}],
+    )
+    first.thought_signature = "opaque-token"  # provider-specific extra
+    model = FakeModel(responses=[first, FakeAI(content="done")])
+    client = LLMClient(model)
+
+    # Turn 1: model asks for a tool.
+    r1 = await client.messages.create(
+        system="s",
+        messages=[{"role": "user", "content": "go"}],
+        tools=[{"name": "probe", "description": "d", "input_schema": {"type": "object"}}],
+    )
+    tool_block = r1.content[0]
+
+    # Turn 2: echo the assistant turn + tool result, as the graph does.
+    lc = client.messages._ai_cache  # the raw AIMessage was cached under its id
+    assert "sig-1" in lc
+    echoed = [
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "content": [_Block(type="tool_use", id=tool_block.id, name="probe")],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "sig-1", "content": "x"}],
+        },
+    ]
+    built = llm_mod._to_lc_messages("s", echoed, cache=lc)
+    # The assistant message is the exact cached object (signature intact),
+    # not a reconstruction.
+    assert built[2] is first
+    assert getattr(built[2], "thought_signature", None) == "opaque-token"
+
+
 def test_from_lc_response_handles_list_content():
     ai = FakeAI(content=[{"type": "text", "text": "hello "}, {"type": "text", "text": "world"}])
     resp = _from_lc_response(ai)

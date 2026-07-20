@@ -73,8 +73,15 @@ def _is_rate_limit(exc: Exception) -> bool:
     )
 
 
-def _to_lc_messages(system: str, messages: list) -> list:
-    """Translate the Anthropic message shape into LangChain messages."""
+def _to_lc_messages(system: str, messages: list, cache: dict | None = None) -> list:
+    """Translate the Anthropic message shape into LangChain messages.
+
+    When `cache` maps a tool_call id to the original LangChain AIMessage that
+    produced it, an assistant turn is replayed with that exact object rather than
+    rebuilt. This preserves provider-specific state that a from-scratch rebuild
+    would drop — notably Gemini 3.x `thought_signature` tokens, which the API
+    requires echoed back on every function call.
+    """
     from langchain_core.messages import (
         AIMessage,
         HumanMessage,
@@ -103,6 +110,13 @@ def _to_lc_messages(system: str, messages: list) -> list:
                 else:
                     out.append(HumanMessage(content=str(item)))
         else:  # assistant — content is a list of blocks from a prior _Response
+            tool_ids = [_attr(b, "id") for b in content if _attr(b, "type") == "tool_use"]
+            replay = None
+            if cache:
+                replay = next((cache[i] for i in tool_ids if i in cache), None)
+            if replay is not None:
+                out.append(replay)  # verbatim: keeps thought_signature etc.
+                continue
             text_parts: list[str] = []
             tool_calls: list[dict] = []
             for block in content:
@@ -175,15 +189,21 @@ class _Messages:
 
     def __init__(self, model):
         self._model = model
+        # tool_call id -> the raw LangChain AIMessage that produced it, so a
+        # later turn can be replayed verbatim (preserves provider-specific state).
+        self._ai_cache: dict = {}
 
     async def create(self, *, model=None, max_tokens=None, system="", messages=None, tools=None):
         llm = self._model.bind_tools(_to_lc_tools(tools)) if tools else self._model
-        lc_messages = _to_lc_messages(system, messages or [])
+        lc_messages = _to_lc_messages(system, messages or [], cache=self._ai_cache)
 
         delay = RETRY_BASE_DELAY_S
         for attempt in range(RETRY_MAX + 1):
             try:
                 ai_message = await llm.ainvoke(lc_messages)
+                for call in getattr(ai_message, "tool_calls", None) or []:
+                    if call.get("id"):
+                        self._ai_cache[call["id"]] = ai_message
                 return _from_lc_response(ai_message)
             except Exception as exc:
                 if _is_rate_limit(exc) and attempt < RETRY_MAX:

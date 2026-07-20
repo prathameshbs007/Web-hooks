@@ -15,7 +15,9 @@ class Settings(BaseSettings):
 
     # Agent LLM provider (gemini by default; anthropic as an alternate).
     llm_provider: str = "gemini"
-    llm_model: str = "gemini-2.5-flash"
+    # gemini-3.1-flash-lite works on new free keys (gemini-2.5-flash 404s for
+    # them) and is light enough for a multi-call diagnosis on the free tier.
+    llm_model: str = "gemini-3.1-flash-lite"
     llm_api_key: str = ""
     agent_max_runs_per_endpoint_per_hour: int = 1
     agent_max_runs_per_day: int = 10
