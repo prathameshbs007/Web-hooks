@@ -33,6 +33,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["relay*", "flaky_endpoint*"]
 
+[tool.setuptools.package-data]
+"relay.api" = ["static/*.html"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

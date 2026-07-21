@@ -1,9 +1,10 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -15,6 +16,9 @@ from relay.db.engine import get_engine
 from relay.observability import get_logger, setup_logging
 
 log = get_logger(__name__)
+
+# The single-page dashboard ships next to this module (copied into the image).
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 async def check_postgres() -> bool:
@@ -75,6 +79,11 @@ def create_app() -> FastAPI:
         request: Request, exc: StarletteHTTPException
     ) -> JSONResponse:
         return _error_response(exc.status_code, "http_error", str(exc.detail))
+
+    @app.get("/", include_in_schema=False)
+    @app.get("/dashboard", include_in_schema=False)
+    async def dashboard() -> FileResponse:
+        return FileResponse(STATIC_DIR / "index.html")
 
     @app.get("/metrics")
     async def metrics() -> Response:

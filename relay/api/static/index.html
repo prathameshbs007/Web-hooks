@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Relay — Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #171b21; --panel2: #1e242c; --line: #2a323c;
+    --text: #e6edf3; --muted: #8b98a5; --accent: #4a9eff; --ok: #3fb950;
+    --warn: #d29922; --bad: #f85149; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  a { color: var(--accent); }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 20px;
+    border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .3px; }
+  header .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  header .dot.up { background: var(--ok); } header .dot.down { background: var(--bad); }
+  header .spacer { flex: 1; }
+  header .links a { margin-left: 14px; color: var(--muted); text-decoration: none; font-size: 13px; }
+  header .links a:hover { color: var(--text); }
+  main { max-width: 1100px; margin: 0 auto; padding: 18px; display: grid; gap: 16px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 820px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted);
+    margin: 0 0 12px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+  input, select, textarea, button { font: inherit; }
+  input, select, textarea { width: 100%; background: var(--panel2); border: 1px solid var(--line);
+    color: var(--text); border-radius: 7px; padding: 8px 10px; }
+  textarea { font-family: var(--mono); font-size: 13px; resize: vertical; min-height: 62px; }
+  button { background: var(--accent); color: #04203f; border: 0; border-radius: 7px; padding: 8px 14px;
+    font-weight: 600; cursor: pointer; }
+  button:hover { filter: brightness(1.08); }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); font-weight: 500; }
+  button.ghost:hover { color: var(--text); border-color: var(--muted); }
+  button.sm { padding: 4px 9px; font-size: 12px; }
+  .row { display: flex; gap: 8px; align-items: end; flex-wrap: wrap; }
+  .row > * { flex: 1; } .row > button { flex: 0 0 auto; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .mono { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .s-delivered, .s-closed, .s-active, .s-approved { background: #12331f; color: var(--ok); }
+  .s-failed, .s-pending, .s-delivering, .s-half_open, .s-acknowledged { background: #3a2f12; color: var(--warn); }
+  .s-dead, .s-open, .s-paused, .s-disabled, .s-rejected, .s-agent_error { background: #3a1618; color: var(--bad); }
+  .conf-high { color: var(--ok); } .conf-medium { color: var(--warn); } .conf-low { color: var(--muted); }
+  .empty { color: var(--muted); font-size: 13px; padding: 10px 2px; }
+  .toast { position: fixed; bottom: 18px; right: 18px; background: var(--panel2); border: 1px solid var(--line);
+    border-left: 3px solid var(--accent); padding: 10px 14px; border-radius: 8px; max-width: 340px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.4); opacity: 0; transform: translateY(8px); transition: .2s; }
+  .toast.show { opacity: 1; transform: none; } .toast.err { border-left-color: var(--bad); }
+  details summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+  pre { background: var(--panel2); border: 1px solid var(--line); border-radius: 7px; padding: 10px;
+    white-space: pre-wrap; font-size: 12.5px; margin: 6px 0 0; }
+  .kv { font-size: 12px; color: var(--muted); }
+  .kv b { color: var(--text); font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="conn"></span>
+  <h1>Relay</h1>
+  <span class="kv" id="tenantLabel"></span>
+  <span class="spacer"></span>
+  <span class="links">
+    <a href="/docs" target="_blank">API docs</a>
+    <a href="http://localhost:3000" target="_blank">Grafana</a>
+    <a href="https://github.com/prathameshbs007/Web-hooks" target="_blank">Source</a>
+  </span>
+</header>
+
+<main>
+  <!-- Auth -->
+  <div class="panel">
+    <h2>Connect</h2>
+    <div class="grid">
+      <div>
+        <label>Tenant API key <span class="kv">(stored in this browser)</span></label>
+        <div class="row">
+          <input id="apiKey" placeholder="rk_… (paste an existing key)" />
+          <button class="ghost" onclick="saveKey()">Use</button>
+        </div>
+        <div class="hint">Don't have one? Create a tenant with the admin token &rarr;</div>
+      </div>
+      <div>
+        <label>Admin token <span class="kv">(local default: change-me)</span></label>
+        <div class="row">
+          <input id="adminToken" placeholder="change-me" />
+          <button onclick="createTenant()">Create tenant</button>
+        </div>
+        <div class="hint">Returns a fresh API key and loads it above.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <!-- Create endpoint -->
+    <div class="panel">
+      <h2>Register endpoint</h2>
+      <label>Destination URL</label>
+      <input id="epUrl" value="http://flaky-endpoint:9000/hook/http_500" />
+      <div class="hint">Tip: <span class="mono">…/hook</span> = healthy, <span class="mono">…/hook/http_500</span> = always fails
+        (drives the breaker + agent), <span class="mono">…/hook/timeout</span>, <span class="mono">…/hook/auth_401</span>.</div>
+      <div class="row" style="margin-top:8px">
+        <div>
+          <label>Ordering</label>
+          <select id="epOrdering"><option>unordered</option><option>ordered</option></select>
+        </div>
+        <div>
+          <label>Event types <span class="kv">(comma-sep, blank = all)</span></label>
+          <input id="epTypes" placeholder="order.paid" />
+        </div>
+        <button onclick="createEndpoint()">Create</button>
+      </div>
+      <div id="secretBox"></div>
+    </div>
+
+    <!-- Send event -->
+    <div class="panel">
+      <h2>Send event</h2>
+      <div class="row">
+        <div><label>Endpoint</label><select id="evEndpoint"></select></div>
+      </div>
+      <label>Event type</label>
+      <input id="evType" value="order.paid" />
+      <label>Payload (JSON)</label>
+      <textarea id="evPayload">{"amount": 42}</textarea>
+      <div class="row" style="margin-top:10px">
+        <span class="hint" id="evHint"></span>
+        <button onclick="sendEvent()">Send</button>
+        <button class="ghost sm" onclick="sendBurst()">Send ×12</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Endpoints -->
+  <div class="panel">
+    <h2>Endpoints &amp; circuit breakers</h2>
+    <table><thead><tr><th>URL</th><th>Ordering</th><th>Status</th><th>Breaker</th><th></th></tr></thead>
+      <tbody id="endpoints"><tr><td colspan="5" class="empty">Connect to load endpoints.</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="grid">
+    <!-- Deliveries -->
+    <div class="panel">
+      <h2>Recent deliveries <span class="kv" id="delTick"></span></h2>
+      <table><thead><tr><th>Delivery</th><th>Status</th><th>Att.</th><th></th></tr></thead>
+        <tbody id="deliveries"><tr><td colspan="4" class="empty">—</td></tr></tbody>
+      </table>
+    </div>
+    <!-- DLQ -->
+    <div class="panel">
+      <h2>Dead-letter queue</h2>
+      <div id="dlqActions"></div>
+      <table><thead><tr><th>Delivery</th><th>Endpoint</th><th>Att.</th></tr></thead>
+        <tbody id="dlq"><tr><td colspan="3" class="empty">—</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Diagnoses -->
+  <div class="panel">
+    <h2>Agent diagnoses</h2>
+    <div id="diagnoses"><div class="empty">When a breaker opens (or 5 consecutive failures), the agent posts a diagnosis here.</div></div>
+  </div>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const API = location.origin;
+let KEY = localStorage.getItem('relay_api_key') || '';
+let ADMIN = localStorage.getItem('relay_admin_token') || '';
+let endpointsCache = [];
+
+function toast(msg, err) {
+  const t = $('toast'); t.textContent = msg; t.className = 'toast show' + (err ? ' err' : '');
+  clearTimeout(t._t); t._t = setTimeout(() => t.className = 'toast', 3200);
+}
+
+async function api(path, { method = 'GET', body, admin = false } = {}) {
+  const headers = { 'Content-Type': 'application/json' };
+  const tok = admin ? ADMIN : KEY;
+  if (tok) headers['Authorization'] = 'Bearer ' + tok;
+  const res = await fetch(API + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!res.ok) throw new Error(data?.error?.message || `HTTP ${res.status}`);
+  return data;
+}
+
+// --- auth ---
+function saveKey() {
+  KEY = $('apiKey').value.trim();
+  localStorage.setItem('relay_api_key', KEY);
+  refreshAll(); toast('API key saved.');
+}
+async function createTenant() {
+  ADMIN = $('adminToken').value.trim() || 'change-me';
+  localStorage.setItem('relay_admin_token', ADMIN);
+  try {
+    const t = await api('/v1/tenants', { method: 'POST', admin: true, body: { name: 'dashboard-user' } });
+    KEY = t.api_key; localStorage.setItem('relay_api_key', KEY);
+    $('apiKey').value = KEY;
+    toast('Tenant created — API key loaded.'); refreshAll();
+  } catch (e) { toast('Create tenant failed: ' + e.message, true); }
+}
+
+// --- endpoints ---
+async function createEndpoint() {
+  try {
+    const types = $('epTypes').value.split(',').map(s => s.trim()).filter(Boolean);
+    const ep = await api('/v1/endpoints', { method: 'POST', body: {
+      url: $('epUrl').value.trim(), ordering: $('epOrdering').value, event_types: types } });
+    $('secretBox').innerHTML =
+      `<pre>endpoint ${ep.id}\nsigning secret (shown once): ${ep.signing_secret}</pre>`;
+    toast('Endpoint created.'); loadEndpoints();
+  } catch (e) { toast('Create endpoint failed: ' + e.message, true); }
+}
+async function loadEndpoints() {
+  if (!KEY) return;
+  try {
+    const eps = await api('/v1/endpoints');
+    endpointsCache = eps;
+    const sel = $('evEndpoint'); const cur = sel.value;
+    sel.innerHTML = eps.map(e => `<option value="${e.id}">${short(e.url)} · ${e.id.slice(0,8)}</option>`).join('')
+      || '<option value="">— create one first —</option>';
+    if (cur) sel.value = cur;
+    const rows = await Promise.all(eps.map(async e => {
+      let b = { state: '—' };
+      try { b = await api(`/v1/endpoints/${e.id}/breaker`); } catch {}
+      return `<tr>
+        <td class="mono">${short(e.url)}</td>
+        <td>${e.ordering}</td>
+        <td><span class="pill s-${e.status}">${e.status}</span></td>
+        <td><span class="pill s-${b.state}">${b.state}</span>${b.consecutive ? ` <span class="kv">${b.consecutive} fails</span>` : ''}</td>
+        <td>
+          <button class="ghost sm" onclick="resetBreaker('${e.id}')">reset breaker</button>
+          <button class="ghost sm" onclick="delEndpoint('${e.id}')">delete</button>
+        </td></tr>`;
+    }));
+    $('endpoints').innerHTML = rows.join('') || '<tr><td colspan="5" class="empty">No endpoints yet.</td></tr>';
+  } catch (e) { $('endpoints').innerHTML = `<tr><td colspan="5" class="empty">${e.message}</td></tr>`; }
+}
+async function resetBreaker(id) {
+  try { await api(`/v1/endpoints/${id}/breaker/reset`, { method: 'POST' }); toast('Breaker reset.'); loadEndpoints(); }
+  catch (e) { toast(e.message, true); }
+}
+async function delEndpoint(id) {
+  try { await api(`/v1/endpoints/${id}`, { method: 'DELETE' }); toast('Endpoint deleted.'); refreshAll(); }
+  catch (e) { toast(e.message, true); }
+}
+
+// --- events ---
+async function sendEvent(quiet) {
+  const epId = $('evEndpoint').value;
+  if (!epId) { toast('Create an endpoint first.', true); return; }
+  let payload; try { payload = JSON.parse($('evPayload').value || '{}'); }
+  catch { toast('Payload is not valid JSON.', true); return; }
+  try {
+    await api('/v1/events', { method: 'POST', body: { event_type: $('evType').value.trim(), payload } });
+    if (!quiet) { toast('Event accepted (202).'); setTimeout(loadDeliveries, 800); }
+  } catch (e) { toast(e.message, true); }
+}
+async function sendBurst() {
+  for (let i = 0; i < 12; i++) await sendEvent(true);
+  toast('Sent 12 events.'); setTimeout(() => { loadDeliveries(); loadEndpoints(); }, 1000);
+}
+
+// --- deliveries / dlq / diagnoses ---
+async function loadDeliveries() {
+  if (!KEY) return;
+  try {
+    const d = await api('/v1/deliveries?limit=12');
+    $('deliveries').innerHTML = d.map(x => `<tr>
+      <td class="mono">${x.id.slice(0,8)}</td>
+      <td><span class="pill s-${x.status}">${x.status}</span></td>
+      <td>${x.attempt_count}</td>
+      <td><button class="ghost sm" onclick="showAttempts('${x.id}')">attempts</button></td>
+    </tr>`).join('') || '<tr><td colspan="4" class="empty">No deliveries yet.</td></tr>';
+    $('delTick').textContent = new Date().toLocaleTimeString();
+  } catch (e) { /* not connected */ }
+}
+async function showAttempts(id) {
+  try {
+    const a = await api(`/v1/deliveries/${id}/attempts`);
+    const body = a.map(x => `#${x.attempt_number}  ${x.http_status ?? '—'}  ${x.error_class ?? 'ok'}  ${x.latency_ms}ms`).join('\n');
+    alert(`Attempts for ${id.slice(0,8)}\n\n` + (body || 'none'));
+  } catch (e) { toast(e.message, true); }
+}
+async function loadDlq() {
+  if (!KEY) return;
+  try {
+    const d = await api('/v1/dlq');
+    $('dlq').innerHTML = d.map(x => `<tr>
+      <td class="mono">${x.id.slice(0,8)}</td><td class="mono">${x.endpoint_id.slice(0,8)}</td><td>${x.attempt_count}</td>
+    </tr>`).join('') || '<tr><td colspan="3" class="empty">Empty.</td></tr>';
+    const byEp = [...new Set(d.map(x => x.endpoint_id))];
+    $('dlqActions').innerHTML = byEp.map(ep =>
+      `<button class="ghost sm" onclick="replay('${ep}')">replay ${ep.slice(0,8)}</button>`).join(' ');
+  } catch (e) {}
+}
+async function replay(ep) {
+  try { const r = await api('/v1/dlq/replay', { method: 'POST', body: { endpoint_id: ep } });
+    toast(`Replayed ${r.replayed}.`); refreshAll(); } catch (e) { toast(e.message, true); }
+}
+async function loadDiagnoses() {
+  if (!KEY) return;
+  try {
+    const d = await api('/v1/diagnoses?limit=8');
+    if (!d.length) { $('diagnoses').innerHTML =
+      '<div class="empty">When a breaker opens (or 5 consecutive failures), the agent posts a diagnosis here.</div>'; return; }
+    $('diagnoses').innerHTML = d.map(x => {
+      const ev = x.evidence || {};
+      const actions = (x._actions || []);
+      return `<div class="panel" style="background:var(--panel2);margin-bottom:10px">
+        <div class="kv"><b class="conf-${x.confidence}">${x.root_cause}</b> · ${x.confidence} confidence ·
+          ${ev.verified ? 'verified' : 'unverified'} · $${x.cost_usd} · trigger: ${x.triggered_by} ·
+          <span class="pill s-${x.status}">${x.status}</span></div>
+        <div style="margin-top:6px">${esc(x.recommendation) || '<span class="kv">—</span>'}</div>
+        <details style="margin-top:6px"><summary>drafted email &amp; evidence</summary>
+          <pre>${esc(x.draft_email) || '(none)'}</pre>
+          <div class="kv" style="margin-top:6px">tools: ${(ev.tool_calls||[]).join(', ') || '—'}</div>
+        </details>
+        <div style="margin-top:8px">
+          ${x.status === 'open' ? `<button class="ghost sm" onclick="ackDiag('${x.id}')">acknowledge</button>` : ''}
+        </div>
+      </div>`;
+    }).join('');
+  } catch (e) {}
+}
+async function ackDiag(id) {
+  try { await api(`/v1/diagnoses/${id}/ack`, { method: 'POST' }); toast('Acknowledged.'); loadDiagnoses(); }
+  catch (e) { toast(e.message, true); }
+}
+
+// --- helpers / lifecycle ---
+function short(u){ return u.replace(/^https?:\/\//,'').slice(0,42); }
+function esc(s){ return (s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function refreshAll(){ loadEndpoints(); loadDeliveries(); loadDlq(); loadDiagnoses(); updateTenantLabel(); }
+function updateTenantLabel(){ $('tenantLabel').textContent = KEY ? 'connected · ' + KEY.slice(0,10) + '…' : 'not connected'; }
+
+async function health() {
+  try { const h = await api('/healthz'); $('conn').className = 'dot ' + (h.status === 'ok' ? 'up' : 'down'); }
+  catch { $('conn').className = 'dot down'; }
+}
+
+$('apiKey').value = KEY; $('adminToken').value = ADMIN;
+updateTenantLabel(); health(); refreshAll();
+setInterval(health, 5000);
+setInterval(() => { loadDeliveries(); loadEndpoints(); loadDlq(); loadDiagnoses(); }, 4000);
+</script>
+</body>
+</html>
