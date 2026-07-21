@@ -3,12 +3,48 @@
 Multi-tenant webhook delivery (retries, DLQ, HMAC signing, ordering, tenant isolation,
 circuit breakers) plus a LangGraph agent that diagnoses failing customer endpoints.
 
+## Architecture
+
+```
+ tenant                                                    ┌─────────────┐
+   │ POST /v1/events                                       │  Prometheus │
+   ▼                                                       │  + Grafana  │
+┌──────┐  validate, persist,     ┌────────────┐            └──────△──────┘
+│ api  │  idempotency, fan-out   │ Postgres   │  /metrics scrape ─┘ (api,
+│      │────────────────────────▶│ events,    │◀───────────────────  worker,
+└──┬───┘  202 Accepted           │ deliveries,│                      scheduler,
+   │                             │ attempts,  │                      agent)
+   │ XADD (sharded by endpoint)  │ diagnoses  │
+   ▼                             └────△───────┘
+ Redis Stream relay:deliveries:{0..7}  │ attempt rows
+   │  consumer group "workers"         │
+   ▼                                   │
+┌────────┐ ordering→rate-limit→        │        ┌───────────────┐
+│ worker │ concurrency→breaker gates   │        │ retry-        │
+│ (×N)   │ ── httpx POST (signed) ─────┘        │ scheduler     │
+└──┬─────┘        │ success → delivered          │ ZSET poller,  │
+   │ failure      │                              │ due → stream  │
+   ▼              ▼                              └──────△────────┘
+ Redis ZSET relay:retries ──────────────────────────────┘
+   │  attempts exhausted → status 'dead' (DLQ)
+   ▼
+ breaker opens ──pub/sub relay:breaker-events──▶ ┌────────┐  LangGraph:
+ (or 5 consecutive failures)                     │ agent  │  triage→investigate
+                                                 │        │  →hypothesize→verify
+                                                 └───┬────┘  →report
+                                                     ▼
+                                    diagnoses row + drafted email;
+                                    mutating actions await human approval
+```
+
 ## Quick start
 
 ```sh
 cp .env.example .env
+# optional: add a free Gemini key (LLM_API_KEY) for the agent — see "Agent LLM options"
 docker compose up -d
 curl http://localhost:8000/healthz
+python scripts/demo.py          # the whole story end to end, ~2 min
 ```
 
 ## Development
@@ -221,6 +257,80 @@ provider packages are imported only when a real run happens).
 > produce lower-confidence diagnoses than a frontier model, and the free tier is
 > rate-limited — the agent backs off and retries on 429, then fails the run
 > gracefully (an `agent_error` diagnosis; delivery is unaffected).
+
+## Deploying on a single VPS
+
+The production overlay puts everything behind Caddy (automatic HTTPS via
+Let's Encrypt) and stops exposing Postgres/Redis to the host.
+
+1. Point two DNS `A` records (e.g. `relay.example.com`, `grafana.example.com`) at
+   the VPS. Open ports 80 and 443.
+2. Clone the repo, then create `.env`:
+
+   ```sh
+   cp .env.example .env
+   # set, at minimum:
+   #   ADMIN_TOKEN=<long random>
+   #   RELAY_DOMAIN=relay.example.com
+   #   GRAFANA_DOMAIN=grafana.example.com
+   #   GF_SECURITY_ADMIN_PASSWORD=<random>
+   #   LLM_API_KEY=<gemini key>            # optional, for the agent
+   ```
+
+3. Bring it up with the prod overlay:
+
+   ```sh
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+   ```
+
+   Caddy provisions certificates on first request. The API is then at
+   `https://relay.example.com`, Grafana at `https://grafana.example.com`.
+
+What the overlay changes ([docker-compose.prod.yml](docker-compose.prod.yml)):
+Caddy is the only service with published ports; Postgres/Redis are internal;
+two workers by default (`--scale worker=N` for more); `restart: always`
+everywhere; the flaky simulator is excluded; Grafana anonymous access is off.
+
+**Operational note — Redis durability.** Delivery in-flight state (streams, the
+retry ZSET, breaker and rate-limit keys) lives in Redis. The workers survive a
+Redis restart, but this compose runs Redis without persistence, so a Redis data
+loss drops in-flight retry schedules (the durable record of every delivery still
+lives in Postgres). For production, enable Redis AOF and a volume.
+
+## Limitations (honest list)
+
+- **Single region, at-least-once.** No multi-region replication and no
+  exactly-once delivery — receivers must dedupe on `Relay-Event-Id`. Duplicate
+  sends are expected on retries and worker crashes.
+- **No SLA / no billing / no SPA frontend** — explicit non-goals (spec §1).
+- **Delivery throughput is per-worker.** Measured ~100 deliveries/sec with one
+  worker container on dev hardware; ingestion sustains ~270/sec. Scale delivery
+  with more workers; it's sharded, so they don't contend.
+- **DLQ is slow to reach by design.** The backoff schedule runs to ~8h before a
+  delivery dead-letters, so the DLQ/replay path is proven by tests, not the
+  short demo.
+- **Redis is not persisted by default** (see the operational note above).
+- **Agent quality tracks the model.** On a free-tier Gemini model, diagnoses are
+  solid on clear failures (down endpoints, timeouts, TLS) but lower-confidence on
+  ambiguous flapping than a frontier model would be. Cost is metered
+  (`relay_agent_cost_usd_total`) and capped per run.
+- **The measured numbers are dev-hardware, local-receiver.** Delivery p95 of
+  ~10ms reflects Relay's own overhead, not real internet round-trips to a
+  customer endpoint.
+
+## Measured numbers
+
+Dev hardware, one worker, local receiver, 50 locust users / 60s:
+
+| Metric | Value |
+|---|---|
+| Sustained ingestion | ~270 events/sec, 0 failures |
+| Delivery p95 (Relay overhead) | ~10 ms |
+| Agent diagnosis (gemini-3.1-flash-lite) | ~$0.005/run, ~15s, verified high-confidence |
+
+Reproduce ingestion numbers with the locust file in
+[scripts/loadtest/](scripts/loadtest/locustfile.py); reproduce the full story
+with [scripts/demo.py](scripts/demo.py).
 
 Full specification and build phases: [CLAUDE.md](CLAUDE.md).
 This README grows with each phase (architecture, signing verification, ordering
