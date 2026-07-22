@@ -1,15 +1,12 @@
 # Production overlay: `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d`.
 #
-# Differences from the dev compose:
-#   - Caddy terminates TLS and is the only service with published ports.
-#   - Postgres and Redis are NOT exposed to the host (dev maps them for tests).
-#   - api/worker/scheduler/agent do not publish ports; Caddy/Prometheus reach
-#     them over the compose network.
-#   - Two workers by default; scale with --scale worker=N.
-#   - restart: always everywhere.
+# Public surface = the dashboard/API only, behind Caddy (automatic TLS).
+# Everything else (Postgres, Redis, Grafana, Prometheus, the demo receiver) runs
+# on the internal network with no public port. Grafana is bound to 127.0.0.1 so
+# an operator can reach it over an SSH tunnel, never from the internet.
 #
-# Secrets (ADMIN_TOKEN, LLM_API_KEY, RELAY_DOMAIN, GRAFANA_DOMAIN,
-# GF_SECURITY_ADMIN_PASSWORD) come from .env — never commit real values.
+# Secrets come from .env — never commit real values:
+#   ADMIN_TOKEN, LLM_API_KEY, RELAY_DOMAIN, GF_SECURITY_ADMIN_PASSWORD
 
 services:
   caddy:
@@ -20,14 +17,12 @@ services:
       - "443:443"
     environment:
       RELAY_DOMAIN: ${RELAY_DOMAIN}
-      GRAFANA_DOMAIN: ${GRAFANA_DOMAIN}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
       - api
-      - grafana
 
   postgres:
     ports: []
@@ -52,11 +47,12 @@ services:
   agent:
     restart: always
 
-  # The flaky simulator is a dev/demo fixture — don't run it in prod. Override
-  # to a no-op so `-f prod` doesn't start it. Remove this block if you want the
-  # bundled demo receiver available.
+  # The demo receiver stays running (internal only) so the public dashboard is
+  # interactive — visitors can point an endpoint at it and watch the pipeline.
+  # Not exposed to the host. Drop this override to omit it from a real prod run.
   flaky-endpoint:
-    profiles: ["donotstart"]
+    ports: []
+    restart: always
 
   prometheus:
     restart: always
@@ -64,10 +60,11 @@ services:
 
   grafana:
     restart: always
-    ports: []
+    # 127.0.0.1 only: reachable via `ssh -L 3000:localhost:3000 <vm>`, never public.
+    ports:
+      - "127.0.0.1:3000:3000"
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-changeme}
-      GF_SERVER_ROOT_URL: https://${GRAFANA_DOMAIN}
       GF_AUTH_ANONYMOUS_ENABLED: "false"
 
 volumes:

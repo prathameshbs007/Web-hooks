@@ -258,38 +258,64 @@ provider packages are imported only when a real run happens).
 > rate-limited — the agent backs off and retries on 429, then fails the run
 > gracefully (an `agent_error` diagnosis; delivery is unaffected).
 
-## Deploying on a single VPS
+## Deploying to a public URL
 
-The production overlay puts everything behind Caddy (automatic HTTPS via
-Let's Encrypt) and stops exposing Postgres/Redis to the host.
+The production overlay ([docker-compose.prod.yml](docker-compose.prod.yml)) makes
+**only the dashboard/API public**, behind Caddy (automatic HTTPS via Let's
+Encrypt). Postgres, Redis, Prometheus, and Grafana stay on the internal network
+with no public port; Grafana is bound to `127.0.0.1` so an operator can reach it
+over an SSH tunnel, never from the internet.
 
-1. Point two DNS `A` records (e.g. `relay.example.com`, `grafana.example.com`) at
-   the VPS. Open ports 80 and 443.
-2. Clone the repo, then create `.env`:
+### Oracle Cloud "Always Free" (recommended — free 24/7)
+
+Oracle's Ampere (ARM) Always Free tier gives up to 4 cores / 24 GB RAM at no
+cost. The images are multi-arch, so ARM works unchanged.
+
+1. **Create the VM.** Oracle console → launch an **Ampere A1** instance,
+   Ubuntu 22.04. Note its public IP.
+2. **Open the cloud firewall.** In the instance's subnet Security List (or an
+   NSG), add ingress for TCP **80** and **443** from `0.0.0.0/0`.
+3. **Get a free hostname.** Register a `*.duckdns.org` subdomain (free) and point
+   it at the VM's public IP. (Any domain works; DuckDNS just avoids buying one.)
+4. **Bootstrap.** SSH in and run:
 
    ```sh
-   cp .env.example .env
-   # set, at minimum:
-   #   ADMIN_TOKEN=<long random>
-   #   RELAY_DOMAIN=relay.example.com
-   #   GRAFANA_DOMAIN=grafana.example.com
-   #   GF_SECURITY_ADMIN_PASSWORD=<random>
-   #   LLM_API_KEY=<gemini key>            # optional, for the agent
+   git clone https://github.com/prathameshbs007/Web-hooks.git relay && cd relay
+   bash scripts/deploy-oracle.sh          # installs Docker, opens the *instance*
+                                          # firewall, writes .env with strong secrets
+   nano .env                              # set RELAY_DOMAIN=<you>.duckdns.org and LLM_API_KEY
+   bash scripts/deploy-oracle.sh          # run again to bring the stack up
    ```
 
-3. Bring it up with the prod overlay:
+   The script handles the two Oracle gotchas: the instance's own `iptables`
+   (Ubuntu images block 80/443 even after the cloud rule is set), and generating
+   real `ADMIN_TOKEN` / Grafana secrets so no default ships to prod.
 
-   ```sh
-   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
-   ```
+Once DNS resolves and 80/443 are open, Caddy provisions the cert on first
+request. Then:
 
-   Caddy provisions certificates on first request. The API is then at
-   `https://relay.example.com`, Grafana at `https://grafana.example.com`.
+- **Dashboard**: `https://<you>.duckdns.org/`
+- **API docs**: `https://<you>.duckdns.org/docs`
+- **Grafana** (private): `ssh -L 3000:localhost:3000 ubuntu@<vm-ip>` → http://localhost:3000
 
-What the overlay changes ([docker-compose.prod.yml](docker-compose.prod.yml)):
-Caddy is the only service with published ports; Postgres/Redis are internal;
-two workers by default (`--scale worker=N` for more); `restart: always`
-everywhere; the flaky simulator is excluded; Grafana anonymous access is off.
+### Any other VPS
+
+Same overlay, any host with Docker. Point a DNS `A` record at it, open 80/443,
+set `.env` (`ADMIN_TOKEN`, `RELAY_DOMAIN`, `GF_SECURITY_ADMIN_PASSWORD`,
+`LLM_API_KEY`), then:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+What the overlay changes: Caddy is the only internet-facing service; two workers
+by default (`--scale worker=N` for more); `restart: always`; the demo receiver
+runs internally so the public dashboard stays interactive.
+
+> **Public dashboard note.** Creating a tenant requires `ADMIN_TOKEN`, so random
+> visitors can't provision tenants — set a strong one. To let someone try the
+> dashboard, share that token (they paste it into the "Create tenant" field) or
+> hand them an API key you created.
 
 **Operational note — Redis durability.** Delivery in-flight state (streams, the
 retry ZSET, breaker and rate-limit keys) lives in Redis. The workers survive a
